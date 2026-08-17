@@ -41,13 +41,15 @@ fn parseImpl(allocator: std.mem.Allocator, source: []const u8, format: InputForm
         p.raw_parse_ns = elapsedNs(stage_start, io);
         stage_start = std.Io.Timestamp.now(io, .awake);
     }
-    try resolveAltlocs(allocator, &structure);
+    // Assign the exact model/chain/sequence/insertion identity first so
+    // conformer resolution can use compact residue-index keys.
+    try assignResidues(allocator, &structure);
     if (profile) |p| {
-        p.altloc_ns = elapsedNs(stage_start, io);
+        p.residue_assignment_ns = elapsedNs(stage_start, io);
         stage_start = std.Io.Timestamp.now(io, .awake);
     }
-    try assignResidues(allocator, &structure);
-    if (profile) |p| p.residue_assignment_ns = elapsedNs(stage_start, io);
+    try resolveAltlocs(allocator, &structure);
+    if (profile) |p| p.altloc_ns = elapsedNs(stage_start, io);
     return structure;
 }
 
@@ -198,6 +200,19 @@ const Tokenizer = struct {
     }
 };
 
+fn atomSiteLoopHint(source: []const u8) usize {
+    const atom_site = std.mem.indexOf(u8, source, "_atom_site.") orelse return 0;
+    var prefix = source[0..atom_site];
+    while (std.mem.lastIndexOf(u8, prefix, "loop_")) |loop_start| {
+        const before_ok = loop_start == 0 or std.ascii.isWhitespace(source[loop_start - 1]);
+        const loop_end = loop_start + "loop_".len;
+        const after_ok = loop_end == source.len or std.ascii.isWhitespace(source[loop_end]);
+        if (before_ok and after_ok) return loop_start;
+        prefix = prefix[0..loop_start];
+    }
+    return 0;
+}
+
 fn findColumn(tags: []const []const u8, names: []const []const u8) ?usize {
     for (names) |name| for (tags, 0..) |tag, i| if (std.ascii.eqlIgnoreCase(tag, name)) return i;
     return null;
@@ -216,7 +231,11 @@ fn preferredValue(row: []const []const u8, preferred: ?usize, fallback_col: ?usi
 fn parseMmcif(allocator: std.mem.Allocator, source: []const u8, wanted_model: u32) !model.Structure {
     var result = model.Structure{};
     errdefer result.deinit(allocator);
-    var tok = Tokenizer{ .source = source };
+    // Most deposited mmCIF files contain substantial metadata before the
+    // atom-site loop. Start at the nearest lexical loop hint when the standard
+    // spelling is present; the normal token parser still validates the loop,
+    // and position zero remains the grammar-complete fallback.
+    var tok = Tokenizer{ .source = source, .pos = atomSiteLoopHint(source) };
     while (tok.next()) |token| {
         if (!std.ascii.eqlIgnoreCase(token, "loop_")) continue;
         var tags = std.ArrayListUnmanaged([]const u8).empty;
@@ -251,50 +270,52 @@ fn parseMmcif(allocator: std.mem.Allocator, source: []const u8, wanted_model: u3
             (auth_chain_c == null and label_chain_c == null) or (auth_seq_c == null and label_seq_c == null) or
             x_c == null or y_c == null or z_c == null) return error.MissingAtomSiteColumn;
 
-        var row = std.ArrayListUnmanaged([]const u8).empty;
-        defer row.deinit(allocator);
+        const row = try allocator.alloc([]const u8, tags.items.len);
+        defer allocator.free(row);
+        var row_len: usize = 0;
         var item = first_value;
         while (item) |v| {
             if (std.mem.startsWith(u8, v, "_") or std.ascii.eqlIgnoreCase(v, "loop_") or std.ascii.eqlIgnoreCase(v, "stop_") or std.mem.startsWith(u8, v, "data_")) break;
-            try row.append(allocator, v);
-            if (row.items.len == tags.items.len) {
-                const row_model = try std.fmt.parseInt(u32, value(row.items, model_c, "1"), 10);
+            row[row_len] = v;
+            row_len += 1;
+            if (row_len == tags.items.len) {
+                const row_model = try std.fmt.parseInt(u32, value(row, model_c, "1"), 10);
                 if (row_model == wanted_model) {
-                    const atom_name = try model.Field.init(preferredValue(row.items, auth_name_c, label_name_c, ""));
-                    const group = value(row.items, group_c, "ATOM");
+                    const atom_name = try model.Field.init(preferredValue(row, auth_name_c, label_name_c, ""));
+                    const group = value(row, group_c, "ATOM");
                     const is_atom_group = std.ascii.eqlIgnoreCase(group, "ATOM");
                     if (!is_atom_group and !std.ascii.eqlIgnoreCase(group, "HETATM")) return error.InvalidAtomSiteGroup;
-                    const label_chain = preferredValue(row.items, label_chain_c, auth_chain_c, "");
-                    const x = try std.fmt.parseFloat(f64, value(row.items, x_c, ""));
-                    const y = try std.fmt.parseFloat(f64, value(row.items, y_c, ""));
-                    const z = try std.fmt.parseFloat(f64, value(row.items, z_c, ""));
+                    const label_chain = preferredValue(row, label_chain_c, auth_chain_c, "");
+                    const x = try std.fmt.parseFloat(f64, value(row, x_c, ""));
+                    const y = try std.fmt.parseFloat(f64, value(row, y_c, ""));
+                    const z = try std.fmt.parseFloat(f64, value(row, z_c, ""));
                     if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return error.NonFiniteCoordinate;
-                    const occupancy_text = value(row.items, occ_c, "1");
+                    const occupancy_text = value(row, occ_c, "1");
                     const occupancy = if (std.mem.eql(u8, occupancy_text, ".") or std.mem.eql(u8, occupancy_text, "?")) 1.0 else try std.fmt.parseFloat(f64, occupancy_text);
                     if (!std.math.isFinite(occupancy) or occupancy < 0) return error.InvalidOccupancy;
                     try result.atoms.append(allocator, .{
-                        .serial = std.fmt.parseInt(u32, value(row.items, id_c, "0"), 10) catch @intCast(result.atoms.items.len + 1),
+                        .serial = std.fmt.parseInt(u32, value(row, id_c, "0"), 10) catch @intCast(result.atoms.items.len + 1),
                         .model = row_model,
                         .record = if (is_atom_group) .atom else .hetatm,
                         .name = atom_name,
-                        .altloc = try model.Field.init(value(row.items, alt_c, "")),
-                        .residue_name = try model.Field.init(preferredValue(row.items, auth_resn_c, label_resn_c, "")),
-                        .chain = try model.Field.init(preferredValue(row.items, auth_chain_c, label_chain_c, "")),
+                        .altloc = try model.Field.init(value(row, alt_c, "")),
+                        .residue_name = try model.Field.init(preferredValue(row, auth_resn_c, label_resn_c, "")),
+                        .chain = try model.Field.init(preferredValue(row, auth_chain_c, label_chain_c, "")),
                         .internal_chain = try model.Field.init(label_chain),
-                        .residue_seq = try std.fmt.parseInt(i32, preferredValue(row.items, auth_seq_c, label_seq_c, ""), 10),
-                        .insertion = try model.Field.init(value(row.items, ins_c, "")),
-                        .element = if (elem_c != null) try model.Field.init(value(row.items, elem_c, "")) else try model.inferElement(atom_name.slice()),
+                        .residue_seq = try std.fmt.parseInt(i32, preferredValue(row, auth_seq_c, label_seq_c, ""), 10),
+                        .insertion = try model.Field.init(value(row, ins_c, "")),
+                        .element = if (elem_c != null) try model.Field.init(value(row, elem_c, "")) else try model.inferElement(atom_name.slice()),
                         .x = x,
                         .y = y,
                         .z = z,
                         .occupancy = occupancy,
                     });
                 }
-                row.clearRetainingCapacity();
+                row_len = 0;
             }
             item = tok.next();
         }
-        if (row.items.len != 0) return error.IncompleteAtomSiteRow;
+        if (row_len != 0) return error.IncompleteAtomSiteRow;
         return result;
     }
     return error.NoAtomSiteLoop;
@@ -312,11 +333,8 @@ fn altBetter(candidate: model.Atom, incumbent: model.Atom) bool {
 }
 
 const AtomSiteKey = struct {
-    model_num: u32,
+    residue_index: u32,
     name: model.Field,
-    internal_chain: model.Field,
-    seq: i32,
-    insertion: model.Field,
 };
 
 const ResidueKey = struct {
@@ -326,7 +344,7 @@ const ResidueKey = struct {
     insertion: model.Field,
 };
 
-const ConformerKey = struct { residue: ResidueKey, label: model.Field };
+const ConformerKey = struct { residue_index: u32, label: model.Field };
 const ConformerChoice = struct { label: model.Field, score: f64 };
 
 fn residueKey(atom: model.Atom) ResidueKey {
@@ -342,11 +360,8 @@ fn labelPreferred(candidate: model.Field, incumbent: model.Field) bool {
 
 fn atomSiteKey(atom: model.Atom) AtomSiteKey {
     return .{
-        .model_num = atom.model,
+        .residue_index = atom.residue_index,
         .name = atom.name,
-        .internal_chain = model.Atom.internalId(atom),
-        .seq = atom.residue_seq,
-        .insertion = atom.insertion,
     };
 }
 
@@ -383,15 +398,15 @@ fn resolveAltlocs(allocator: std.mem.Allocator, structure: *model.Structure) !vo
     defer scores.deinit(allocator);
     for (structure.atoms.items) |atom| {
         if (atom.altloc.len == 0) continue;
-        const entry = try scores.getOrPut(allocator, .{ .residue = residueKey(atom), .label = atom.altloc });
+        const entry = try scores.getOrPut(allocator, .{ .residue_index = atom.residue_index, .label = atom.altloc });
         if (!entry.found_existing) entry.value_ptr.* = 0;
         entry.value_ptr.* += atom.occupancy;
     }
-    var choices = std.AutoHashMapUnmanaged(ResidueKey, ConformerChoice).empty;
+    var choices = std.AutoHashMapUnmanaged(u32, ConformerChoice).empty;
     defer choices.deinit(allocator);
     var score_iterator = scores.iterator();
     while (score_iterator.next()) |entry| {
-        const choice = try choices.getOrPut(allocator, entry.key_ptr.residue);
+        const choice = try choices.getOrPut(allocator, entry.key_ptr.residue_index);
         if (!choice.found_existing or entry.value_ptr.* > choice.value_ptr.score or
             (entry.value_ptr.* == choice.value_ptr.score and labelPreferred(entry.key_ptr.label, choice.value_ptr.label)))
             choice.value_ptr.* = .{ .label = entry.key_ptr.label, .score = entry.value_ptr.* };
@@ -410,7 +425,7 @@ fn resolveAltlocs(allocator: std.mem.Allocator, structure: *model.Structure) !vo
             try ordered.append(allocator, .{ .atom = atom, .selected = false });
         }
         const selected = if (atom.altloc.len != 0) selected: {
-            const choice = choices.get(residueKey(atom)) orelse continue;
+            const choice = choices.get(atom.residue_index) orelse continue;
             break :selected model.Field.eql(atom.altloc, choice.label);
         } else true;
         if (!selected) continue;

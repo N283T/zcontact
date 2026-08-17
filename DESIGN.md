@@ -53,6 +53,9 @@ forms. Local datasets were not changed.
    runtime. Optimization therefore removed those structural costs while
    retaining the scalar distance predicate as the reference implementation.
    Explicit SIMD remains deferred until a measured kernel makes it worthwhile.
+   A second pass likewise retained only measured wins: compact residue-index
+   keys and direct atom-loop tokenization stayed, while a slower manual TSV
+   line builder was discarded.
 
 ## Validation policy
 

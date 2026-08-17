@@ -2,19 +2,14 @@ const std = @import("std");
 const model = @import("model.zig");
 const contact = @import("contact.zig");
 
-fn printAtom(writer: *std.Io.Writer, index: u32, atom: model.Atom) !void {
-    try writer.print("{d}\t{d}\t{s}\t{d}\t{s}\t{s}\t{s}\t{s}\t{d}", .{ index, atom.model, atom.chain.slice(), atom.residue_seq, atom.insertion.slice(), atom.residue_name.slice(), atom.name.slice(), atom.altloc.slice(), atom.serial });
-}
-
 pub fn writeResult(writer: *std.Io.Writer, structure: *const model.Structure, result: *const contact.Result) !void {
     switch (result.*) {
         .atom => |contacts| {
             try writer.writeAll("index1\tmodel1\tchain1\tresseq1\ticode1\tresname1\tatom1\taltloc1\tserial1\tindex2\tmodel2\tchain2\tresseq2\ticode2\tresname2\tatom2\taltloc2\tserial2\tdistance_A\n");
             for (contacts.items) |c| {
-                try printAtom(writer, c.a, structure.atoms.items[c.a]);
-                try writer.writeByte('\t');
-                try printAtom(writer, c.b, structure.atoms.items[c.b]);
-                try writer.print("\t{d:.3}\n", .{c.distance});
+                const a = structure.atoms.items[c.a];
+                const b = structure.atoms.items[c.b];
+                try writer.print("{d}\t{d}\t{s}\t{d}\t{s}\t{s}\t{s}\t{s}\t{d}\t{d}\t{d}\t{s}\t{d}\t{s}\t{s}\t{s}\t{s}\t{d}\t{d:.3}\n", .{ c.a, a.model, a.chain.slice(), a.residue_seq, a.insertion.slice(), a.residue_name.slice(), a.name.slice(), a.altloc.slice(), a.serial, c.b, b.model, b.chain.slice(), b.residue_seq, b.insertion.slice(), b.residue_name.slice(), b.name.slice(), b.altloc.slice(), b.serial, c.distance });
             }
         },
         .residue => |contacts| {

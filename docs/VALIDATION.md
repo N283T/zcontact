@@ -180,3 +180,39 @@ The final profiles still show mixed costs: parse is 29--53% on the larger
 cases, search/aggregation is 17--37%, and atom TSV formatting is 21--33%.
 There is therefore still no evidence that explicit SIMD of the scalar distance
 expression should take priority over parser or output work.
+
+### Second profiling pass
+
+A second pass targeted those remaining mixed costs without changing the public
+CLI or output schema:
+
+1. The mmCIF parser now starts tokenization from a validated lexical hint near
+   the atom-site loop, while retaining position zero as the complete grammar
+   fallback. Atom rows use a fixed-size slice array after the tag count is
+   known rather than repeatedly appending to a dynamic row list. This reduced
+   raw mmCIF parsing by 5--8% on the larger files.
+2. Residue indices are assigned before conformer resolution. Altloc scoring and
+   atom-site deduplication can consequently hash compact integer residue IDs
+   instead of repeated model/chain/sequence/insertion structures. This reduced
+   the altloc stage by 54--57% on the large AFDB PDB/mmCIF pair and 27% on the
+   alternate-containing 1IGT structure.
+3. Atom TSV rows use one formatter invocation instead of three. Output-stage
+   time fell about 6% on the larger atom-mode cases. A subsequent manual stack
+   line-builder experiment made output 4--7% slower and was rejected.
+
+Nine-to-eleven-iteration warm-cache medians relative to commit `40e8991` were:
+
+| Mode | Structure | Before | After | Change |
+| --- | --- | ---: | ---: | ---: |
+| residue | 1CRN gzip mmCIF | 1.049 ms | 0.878 ms | -16.3% |
+| residue | 1IGT gzip mmCIF | 13.306 ms | 12.857 ms | -3.4% |
+| residue | AF-P76347 mmCIF | 15.832 ms | 13.736 ms | -13.2% |
+| residue | AF-P76347 PDB | 12.410 ms | 10.778 ms | -13.2% |
+| atom | 1IGT gzip mmCIF | 16.025 ms | 15.451 ms | -3.6% |
+| atom | AF-P76347 mmCIF | 20.987 ms | 18.846 ms | -10.2% |
+| atom | AF-P76347 PDB | 17.907 ms | 15.878 ms | -11.3% |
+
+Fourteen default atom/residue outputs across the five Gemmi structures and the
+AF-P76347 PDB/mmCIF pair, plus asymmetric selection and atom inventory output,
+were byte-identical to `40e8991`. The 20-test suite and all five Gemmi pair-set
+comparisons also remained exact.
