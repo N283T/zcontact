@@ -216,3 +216,27 @@ Fourteen default atom/residue outputs across the five Gemmi structures and the
 AF-P76347 PDB/mmCIF pair, plus asymmetric selection and atom inventory output,
 were byte-identical to `40e8991`. The 20-test suite and all five Gemmi pair-set
 comparisons also remained exact.
+
+### Full-corpus post-optimization batch
+
+The complete AFDB *E. coli* corpus was rerun after commit `a285944`, using the
+same ReleaseFast binary and known PDB/mmCIF directories. All three runs produced
+4,370 successes, zero failures, 10,520,167 atoms, 1,349,634 residues, 5,505,835
+contacts, and 251,623,549 bytes of contact TSV output.
+
+| Input | Workers | Wall | Peak RSS | Success | Failure |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PDB | 1 | 25.60 s | 15.5 MB | 4,370 | 0 |
+| PDB | 10 | 4.20 s | 50.3 MB | 4,370 | 0 |
+| mmCIF | 10 | 6.07 s | 48.9 MB | 4,370 | 0 |
+
+These are warm-cache local regression runs rather than simultaneous controlled
+A/B measurements, so wall-time differences from the earlier record are only
+indicative. Peak RSS nevertheless fell from the previously recorded 151--169
+MB at ten workers to about 49--50 MB; compact parser hash keys materially reduce
+per-worker transient memory.
+
+SHA-256 was recomputed for every contact TSV. All 4,370 hashes matched between
+the one- and ten-worker PDB runs, and all 4,370 matched accession-by-accession
+between PDB and mmCIF. This confirms that the profiling-guided parser and search
+changes retain both scheduling and format determinism at full-corpus scale.
