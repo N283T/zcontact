@@ -1,0 +1,7 @@
+.{
+    .name = .zcontact,
+    .version = "0.1.0",
+    .fingerprint = 0x89bc6b77c908646e,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "scripts", "docs", "README.md", "DESIGN.md", "LICENSE" },
+}

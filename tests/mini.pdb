@@ -1,0 +1,10 @@
+MODEL        1
+ATOM      1  CA AALA A   1       0.000   0.000   0.000  0.40 10.00           C  
+ATOM      2  CA BALA A   1       0.500   0.000   0.000  0.60 10.00           C  
+ATOM      3  CB  ALA A   1       1.000   0.000   0.000  1.00 10.00           C  
+ATOM      4  CA  GLY A   2       3.000   0.000   0.000  1.00 10.00           C  
+HETATM    5  O   HOH B 101       3.000   3.000   0.000  1.00 10.00           O  
+ENDMDL
+MODEL        2
+ATOM      6  CA  ALA A   1      20.000   0.000   0.000  1.00 10.00           C  
+ENDMDL
