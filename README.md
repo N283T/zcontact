@@ -219,4 +219,5 @@ contents are byte-identical between PDB and mmCIF, and between 1-thread and
 - No MD trajectory input and no dependency on `ztraj` in this static-structure
   MVP.
 
-See [DESIGN.md](DESIGN.md) for investigation notes and deferred decisions.
+See [CHANGELOG.md](CHANGELOG.md) for release history and
+[DESIGN.md](DESIGN.md) for investigation notes and deferred decisions.
