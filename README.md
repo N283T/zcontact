@@ -43,6 +43,21 @@ file instead of standard output.
 at 1,000, 10,000, and 100,000 synthetic atoms. Treat it as a regression aid,
 not as a published cross-tool benchmark.
 
+For development profiling without expanding the stable CLI, use the separate
+ReleaseFast real-file profiler:
+
+```sh
+zig build profile -- --iterations 9 structure.cif.gz > profile.tsv
+zig build profile -- --mode atom --iterations 9 structure.pdb > atom-profile.tsv
+```
+
+It performs one unmeasured warmup per file, then reports per-iteration TSV rows
+for read/decompress, raw parse, altloc resolution, residue assignment,
+selection, grid construction, search/aggregation, result sorting, and TSV
+formatting. It also records atom, cell, candidate-pair, accepted-pair, result,
+and byte counts. This is a development harness, not a supported `zcontact`
+subcommand or a cross-machine benchmark.
+
 ## Scientific definition
 
 - An **atom contact** is an unordered pair of selected atoms whose Cartesian

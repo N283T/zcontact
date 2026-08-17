@@ -114,3 +114,69 @@ bounded-density synthetic chain:
 | 100,000 | 199,997 | 59.7 ms |
 
 This is a regression harness, not a biological or cross-tool benchmark.
+
+## Profiling-first optimization record
+
+The `zig build profile -- ...` development harness was added after the v0.1.0
+baseline was tagged. It is compiled with `ReleaseFast`, performs one unmeasured
+warmup per input, writes measured rows as TSV, and keeps profiling out of the
+stable public CLI. Instrumentation is opt-in: ordinary parser/contact calls do
+not read clocks or increment profiling counters.
+
+The representative corpus deliberately combines small and large structures,
+gzip and plain input, experimental and AFDB data, and equivalent PDB/mmCIF
+representations:
+
+- experimental `1crn.cif.gz` (327 selected atoms),
+- experimental `1igt.cif.gz` (12,956 parsed atoms; insertion-code coverage),
+- AFDB `AF-P76347-F1-model_v6.cif` and its corresponding PDB (17,331 atoms).
+
+Initial stage measurements showed that parse consumed 36--52% of end-to-end
+time on the larger files. Splitting parse revealed that altloc resolution alone
+used 23--34% despite the AFDB structures having no alternate conformers.
+Contact search/aggregation used another 28--43%; atom-mode TSV formatting used
+15--23%. Selection, grid construction, and final sorting were individually
+small. These results did not support distance-kernel SIMD as the first change.
+
+Two measured structural optimizations followed:
+
+1. Blank-altloc structures now use one stable in-place site-deduplication pass.
+   The conformer-aware path preserves first-site order with placeholders, which
+   removes a second site map and the final sort. Altloc-stage median time fell
+   56--73% on the four representative inputs.
+2. Contact traversal now visits pairs of occupied cells rather than performing
+   27 neighbor hash lookups for every atom. On the 17,331-atom AFDB structure,
+   neighbor lookups consequently scale with 5,626 occupied cells rather than
+   all atoms. Candidate and accepted-pair counts are unchanged. Search-stage
+   median time fell 38--47% across the corpus.
+
+Nine-iteration warm-cache medians after both changes, compared with the
+instrumented pre-optimization baseline, were:
+
+| Mode | Structure | Before | After | Change |
+| --- | --- | ---: | ---: | ---: |
+| residue | 1CRN gzip mmCIF | 1.363 ms | 1.013 ms | -25.7% |
+| residue | 1IGT gzip mmCIF | 19.065 ms | 13.022 ms | -31.7% |
+| residue | AF-P76347 mmCIF | 23.844 ms | 15.878 ms | -33.4% |
+| residue | AF-P76347 PDB | 20.576 ms | 12.959 ms | -37.0% |
+| atom | 1IGT gzip mmCIF | 21.098 ms | 16.227 ms | -23.1% |
+| atom | AF-P76347 mmCIF | 28.219 ms | 21.093 ms | -25.3% |
+| atom | AF-P76347 PDB | 24.887 ms | 17.984 ms | -27.7% |
+
+The sub-millisecond 1CRN atom-mode result was noise-sensitive and is omitted
+from the improvement table. These are local regression measurements, not
+cross-tool claims.
+
+Correctness gates after optimization were stronger than count comparison:
+
+- 10 default atom/residue outputs over 1CRN, 1IGT, 1D3Z, and both AF-P76347
+  formats were byte-identical to the tagged v0.1.0 binary;
+- an asymmetric chain-selection output and selected-atom inventory were also
+  byte-identical to v0.1.0;
+- the five Gemmi oracle structures retained zero missing and zero extra pairs;
+- the complete 20-test unit/integration/CLI suite passed.
+
+The final profiles still show mixed costs: parse is 29--53% on the larger
+cases, search/aggregation is 17--37%, and atom TSV formatting is 21--33%.
+There is therefore still no evidence that explicit SIMD of the scalar distance
+expression should take priority over parser or output work.

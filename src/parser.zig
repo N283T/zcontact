@@ -3,6 +3,12 @@ const model = @import("model.zig");
 
 pub const InputFormat = enum { pdb, mmcif };
 
+pub const Profile = struct {
+    raw_parse_ns: u64 = 0,
+    altloc_ns: u64 = 0,
+    residue_assignment_ns: u64 = 0,
+};
+
 pub fn detectFormat(path: []const u8, source: []const u8) !InputFormat {
     if (std.mem.endsWith(u8, path, ".pdb") or std.mem.endsWith(u8, path, ".ent") or std.mem.endsWith(u8, path, ".pdb.gz") or std.mem.endsWith(u8, path, ".ent.gz")) return .pdb;
     if (std.mem.endsWith(u8, path, ".cif") or std.mem.endsWith(u8, path, ".mmcif") or std.mem.endsWith(u8, path, ".cif.gz") or std.mem.endsWith(u8, path, ".mmcif.gz")) return .mmcif;
@@ -13,15 +19,40 @@ pub fn detectFormat(path: []const u8, source: []const u8) !InputFormat {
 }
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8, format: InputFormat, wanted_model: u32) !model.Structure {
+    return parseImpl(allocator, source, format, wanted_model, null);
+}
+
+pub fn parseProfiled(allocator: std.mem.Allocator, source: []const u8, format: InputFormat, wanted_model: u32, profile: *Profile) !model.Structure {
+    profile.* = .{};
+    return parseImpl(allocator, source, format, wanted_model, profile);
+}
+
+fn parseImpl(allocator: std.mem.Allocator, source: []const u8, format: InputFormat, wanted_model: u32, profile: ?*Profile) !model.Structure {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var stage_start: std.Io.Timestamp = undefined;
+    if (profile != null) stage_start = std.Io.Timestamp.now(io, .awake);
     var structure = switch (format) {
         .pdb => try parsePdb(allocator, source, wanted_model),
         .mmcif => try parseMmcif(allocator, source, wanted_model),
     };
     errdefer structure.deinit(allocator);
     if (structure.atoms.items.len == 0) return error.NoAtomsForModel;
+    if (profile) |p| {
+        p.raw_parse_ns = elapsedNs(stage_start, io);
+        stage_start = std.Io.Timestamp.now(io, .awake);
+    }
     try resolveAltlocs(allocator, &structure);
+    if (profile) |p| {
+        p.altloc_ns = elapsedNs(stage_start, io);
+        stage_start = std.Io.Timestamp.now(io, .awake);
+    }
     try assignResidues(allocator, &structure);
+    if (profile) |p| p.residue_assignment_ns = elapsedNs(stage_start, io);
     return structure;
+}
+
+fn elapsedNs(start: std.Io.Timestamp, io: std.Io) u64 {
+    return @intCast(start.untilNow(io, .awake).nanoseconds);
 }
 
 fn field(line: []const u8, start: usize, end: usize) []const u8 {
@@ -309,7 +340,43 @@ fn labelPreferred(candidate: model.Field, incumbent: model.Field) bool {
     return std.mem.lessThan(u8, c, i);
 }
 
+fn atomSiteKey(atom: model.Atom) AtomSiteKey {
+    return .{
+        .model_num = atom.model,
+        .name = atom.name,
+        .internal_chain = model.Atom.internalId(atom),
+        .seq = atom.residue_seq,
+        .insertion = atom.insertion,
+    };
+}
+
+fn resolveBlankSites(allocator: std.mem.Allocator, structure: *model.Structure) !void {
+    var selected_sites = std.AutoHashMapUnmanaged(AtomSiteKey, usize).empty;
+    defer selected_sites.deinit(allocator);
+    var write: usize = 0;
+    for (structure.atoms.items) |atom| {
+        const key = atomSiteKey(atom);
+        if (selected_sites.get(key)) |idx| {
+            if (altBetter(atom, structure.atoms.items[idx])) structure.atoms.items[idx] = atom;
+        } else {
+            try selected_sites.put(allocator, key, write);
+            structure.atoms.items[write] = atom;
+            write += 1;
+        }
+    }
+    structure.atoms.items.len = write;
+}
+
 fn resolveAltlocs(allocator: std.mem.Allocator, structure: *model.Structure) !void {
+    var has_altloc = false;
+    for (structure.atoms.items) |atom| {
+        if (atom.altloc.len != 0) {
+            has_altloc = true;
+            break;
+        }
+    }
+    if (!has_altloc) return resolveBlankSites(allocator, structure);
+
     // Choose one coherent non-blank conformer label per residue position using
     // summed occupancy evidence. Blank atoms are shared by every conformer.
     var scores = std.AutoHashMapUnmanaged(ConformerKey, f64).empty;
@@ -330,46 +397,33 @@ fn resolveAltlocs(allocator: std.mem.Allocator, structure: *model.Structure) !vo
             choice.value_ptr.* = .{ .label = entry.key_ptr.label, .score = entry.value_ptr.* };
     }
 
-    const OrderedAtom = struct { atom: model.Atom, order: usize };
-    var site_order = std.AutoHashMapUnmanaged(AtomSiteKey, usize).empty;
-    defer site_order.deinit(allocator);
-    for (structure.atoms.items, 0..) |atom, order| {
-        const key = AtomSiteKey{ .model_num = atom.model, .name = atom.name, .internal_chain = model.Atom.internalId(atom), .seq = atom.residue_seq, .insertion = atom.insertion };
-        const entry = try site_order.getOrPut(allocator, key);
-        if (!entry.found_existing) entry.value_ptr.* = order;
-    }
+    const OrderedAtom = struct { atom: model.Atom, selected: bool };
     var ordered = std.ArrayListUnmanaged(OrderedAtom).empty;
     defer ordered.deinit(allocator);
     var selected_sites = std.AutoHashMapUnmanaged(AtomSiteKey, usize).empty;
     defer selected_sites.deinit(allocator);
     for (structure.atoms.items) |atom| {
-        if (atom.altloc.len != 0) {
+        const key = atomSiteKey(atom);
+        const entry = try selected_sites.getOrPut(allocator, key);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = ordered.items.len;
+            try ordered.append(allocator, .{ .atom = atom, .selected = false });
+        }
+        const selected = if (atom.altloc.len != 0) selected: {
             const choice = choices.get(residueKey(atom)) orelse continue;
-            if (!model.Field.eql(atom.altloc, choice.label)) continue;
-        }
-        const key = AtomSiteKey{
-            .model_num = atom.model,
-            .name = atom.name,
-            .internal_chain = model.Atom.internalId(atom),
-            .seq = atom.residue_seq,
-            .insertion = atom.insertion,
-        };
-        if (selected_sites.get(key)) |idx| {
-            if (altBetter(atom, ordered.items[idx].atom)) ordered.items[idx].atom = atom;
-        } else {
-            try selected_sites.put(allocator, key, ordered.items.len);
-            try ordered.append(allocator, .{ .atom = atom, .order = site_order.get(key).? });
-        }
+            break :selected model.Field.eql(atom.altloc, choice.label);
+        } else true;
+        if (!selected) continue;
+        const chosen = &ordered.items[entry.value_ptr.*];
+        if (!chosen.selected or altBetter(atom, chosen.atom)) chosen.atom = atom;
+        chosen.selected = true;
     }
-    std.mem.sort(OrderedAtom, ordered.items, {}, struct {
-        fn lessThan(_: void, a: OrderedAtom, b: OrderedAtom) bool {
-            return a.order < b.order;
-        }
-    }.lessThan);
     var chosen = std.ArrayListUnmanaged(model.Atom).empty;
     errdefer chosen.deinit(allocator);
     try chosen.ensureTotalCapacity(allocator, ordered.items.len);
-    for (ordered.items) |entry| chosen.appendAssumeCapacity(entry.atom);
+    for (ordered.items) |entry| {
+        if (entry.selected) chosen.appendAssumeCapacity(entry.atom);
+    }
     structure.atoms.deinit(allocator);
     structure.atoms = chosen;
 }

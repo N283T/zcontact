@@ -46,6 +46,13 @@ forms. Local datasets were not changed.
    output definition.
 7. **TSV only.** It is stable, inspectable, and script-friendly. JSON and sparse
    matrix formats are deferred until consumers establish the schemas they need.
+8. **Profile before vectorizing.** A separate ReleaseFast real-file harness
+   measures the full pipeline without adding options to the stable CLI. The
+   first measurements showed that altloc bookkeeping and repeated neighbor-cell
+   hash lookups, not the three-coordinate distance expression alone, dominated
+   runtime. Optimization therefore removed those structural costs while
+   retaining the scalar distance predicate as the reference implementation.
+   Explicit SIMD remains deferred until a measured kernel makes it worthwhile.
 
 ## Validation policy
 

@@ -5,6 +5,25 @@ const selection = @import("selection.zig");
 pub const Scope = enum { inter_residue, all };
 pub const Mode = enum { atom, residue };
 
+/// Optional development-time instrumentation for the deterministic cell-list
+/// engine. `calculate` does not collect these counters; profiling tools must
+/// opt in through `calculateProfiled`.
+pub const Profile = struct {
+    selection_ns: u64 = 0,
+    grid_ns: u64 = 0,
+    search_ns: u64 = 0,
+    sort_ns: u64 = 0,
+    atoms: usize = 0,
+    selected1_atoms: usize = 0,
+    selected2_atoms: usize = 0,
+    occupied_cells: usize = 0,
+    candidate_pairs: u64 = 0,
+    selection_pairs: u64 = 0,
+    distance_evaluations: u64 = 0,
+    accepted_atom_pairs: u64 = 0,
+    result_count: usize = 0,
+};
+
 pub const AtomContact = struct { a: u32, b: u32, distance: f64 };
 pub const ResidueContact = struct {
     atom_a: u32,
@@ -32,10 +51,23 @@ const CellEntry = struct { cell: Cell, atom: u32 };
 const CellRange = struct { start: usize, end: usize };
 
 pub fn calculate(allocator: std.mem.Allocator, structure: *const model.Structure, mode: Mode, cutoff: f64, select1: []const u8, select2: []const u8, scope: Scope) !Result {
+    return calculateImpl(allocator, structure, mode, cutoff, select1, select2, scope, null);
+}
+
+pub fn calculateProfiled(allocator: std.mem.Allocator, structure: *const model.Structure, mode: Mode, cutoff: f64, select1: []const u8, select2: []const u8, scope: Scope, profile: *Profile) !Result {
+    profile.* = .{};
+    return calculateImpl(allocator, structure, mode, cutoff, select1, select2, scope, profile);
+}
+
+fn calculateImpl(allocator: std.mem.Allocator, structure: *const model.Structure, mode: Mode, cutoff: f64, select1: []const u8, select2: []const u8, scope: Scope, profile: ?*Profile) !Result {
     if (!std.math.isFinite(cutoff) or cutoff <= 0 or !std.math.isFinite(cutoff * cutoff)) return error.InvalidCutoff;
     try selection.validate(select1);
     try selection.validate(select2);
     const atoms = structure.atoms.items;
+    if (profile) |p| p.atoms = atoms.len;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var stage_start: std.Io.Timestamp = undefined;
+    if (profile != null) stage_start = std.Io.Timestamp.now(io, .awake);
     const cutoff2 = cutoff * cutoff;
     const mask1 = try allocator.alloc(bool, atoms.len);
     defer allocator.free(mask1);
@@ -44,6 +76,14 @@ pub fn calculate(allocator: std.mem.Allocator, structure: *const model.Structure
     for (atoms, 0..) |atom, i| {
         mask1[i] = selection.matches(atom, select1);
         mask2[i] = selection.matches(atom, select2);
+        if (profile) |p| {
+            if (mask1[i]) p.selected1_atoms += 1;
+            if (mask2[i]) p.selected2_atoms += 1;
+        }
+    }
+    if (profile) |p| {
+        p.selection_ns = elapsedNs(stage_start, io);
+        stage_start = std.Io.Timestamp.now(io, .awake);
     }
 
     // Sort atoms into cutoff-sized cells, then visit the 27 neighboring cells.
@@ -62,26 +102,52 @@ pub fn calculate(allocator: std.mem.Allocator, structure: *const model.Structure
         try ranges.put(allocator, entries[start].cell, .{ .start = start, .end = end });
         start = end;
     }
+    if (profile) |p| {
+        p.occupied_cells = ranges.count();
+        p.grid_ns = elapsedNs(stage_start, io);
+        stage_start = std.Io.Timestamp.now(io, .awake);
+    }
 
     if (mode == .atom) {
         var contacts = std.ArrayListUnmanaged(AtomContact).empty;
         errdefer contacts.deinit(allocator);
-        for (atoms, 0..) |a, i| {
-            const home = try cellFor(a, cutoff);
+        start = 0;
+        while (start < entries.len) {
+            const home = entries[start].cell;
+            const home_range = ranges.get(home).?;
+            start = home_range.end;
             for ([_]i64{ -1, 0, 1 }) |dx| for ([_]i64{ -1, 0, 1 }) |dy| for ([_]i64{ -1, 0, 1 }) |dz| {
-                const range = ranges.get(.{ .x = home.x + dx, .y = home.y + dy, .z = home.z + dz }) orelse continue;
-                for (entries[range.start..range.end]) |entry| {
-                    const j: usize = entry.atom;
-                    if (j <= i) continue;
+                const neighbor = Cell{ .x = home.x + dx, .y = home.y + dy, .z = home.z + dz };
+                if (cellLessThan(neighbor, home)) continue;
+                const range = ranges.get(neighbor) orelse continue;
+                for (entries[home_range.start..home_range.end]) |home_entry| for (entries[range.start..range.end]) |entry| {
+                    if (cellEqual(home, neighbor) and entry.atom <= home_entry.atom) continue;
+                    const i: usize = @min(home_entry.atom, entry.atom);
+                    const j: usize = @max(home_entry.atom, entry.atom);
+                    if (profile) |p| p.candidate_pairs += 1;
+                    const a = atoms[i];
                     const b = atoms[j];
                     const oriented = orientPair(@intCast(i), @intCast(j), mask1[i], mask2[i], mask1[j], mask2[j]) orelse continue;
+                    if (profile) |p| p.selection_pairs += 1;
                     if (scope == .inter_residue and a.residue_index == b.residue_index) continue;
+                    if (profile) |p| p.distance_evaluations += 1;
                     const d2 = distanceSquared(a, b);
-                    if (d2 <= cutoff2) try contacts.append(allocator, .{ .a = oriented.a, .b = oriented.b, .distance = @sqrt(d2) });
-                }
+                    if (d2 <= cutoff2) {
+                        if (profile) |p| p.accepted_atom_pairs += 1;
+                        try contacts.append(allocator, .{ .a = oriented.a, .b = oriented.b, .distance = @sqrt(d2) });
+                    }
+                };
             };
         }
+        if (profile) |p| {
+            p.search_ns = elapsedNs(stage_start, io);
+            stage_start = std.Io.Timestamp.now(io, .awake);
+        }
         std.mem.sort(AtomContact, contacts.items, {}, atomContactLessThan);
+        if (profile) |p| {
+            p.sort_ns = elapsedNs(stage_start, io);
+            p.result_count = contacts.items.len;
+        }
         return .{ .atom = contacts };
     }
 
@@ -89,18 +155,29 @@ pub fn calculate(allocator: std.mem.Allocator, structure: *const model.Structure
     defer index.deinit(allocator);
     var contacts = std.ArrayListUnmanaged(ResidueContact).empty;
     errdefer contacts.deinit(allocator);
-    for (atoms, 0..) |a, i| {
-        const home = try cellFor(a, cutoff);
+    start = 0;
+    while (start < entries.len) {
+        const home = entries[start].cell;
+        const home_range = ranges.get(home).?;
+        start = home_range.end;
         for ([_]i64{ -1, 0, 1 }) |dx| for ([_]i64{ -1, 0, 1 }) |dy| for ([_]i64{ -1, 0, 1 }) |dz| {
-            const range = ranges.get(.{ .x = home.x + dx, .y = home.y + dy, .z = home.z + dz }) orelse continue;
-            for (entries[range.start..range.end]) |entry| {
-                const j: usize = entry.atom;
-                if (j <= i) continue;
+            const neighbor = Cell{ .x = home.x + dx, .y = home.y + dy, .z = home.z + dz };
+            if (cellLessThan(neighbor, home)) continue;
+            const range = ranges.get(neighbor) orelse continue;
+            for (entries[home_range.start..home_range.end]) |home_entry| for (entries[range.start..range.end]) |entry| {
+                if (cellEqual(home, neighbor) and entry.atom <= home_entry.atom) continue;
+                const i: usize = @min(home_entry.atom, entry.atom);
+                const j: usize = @max(home_entry.atom, entry.atom);
+                if (profile) |p| p.candidate_pairs += 1;
+                const a = atoms[i];
                 const b = atoms[j];
                 const oriented = orientPair(@intCast(i), @intCast(j), mask1[i], mask2[i], mask1[j], mask2[j]) orelse continue;
+                if (profile) |p| p.selection_pairs += 1;
                 if (scope == .inter_residue and a.residue_index == b.residue_index) continue;
+                if (profile) |p| p.distance_evaluations += 1;
                 const d2 = distanceSquared(a, b);
                 if (d2 > cutoff2) continue;
+                if (profile) |p| p.accepted_atom_pairs += 1;
                 const key = ResiduePair{ .a = @min(a.residue_index, b.residue_index), .b = @max(a.residue_index, b.residue_index) };
                 const d = @sqrt(d2);
                 if (index.get(key)) |idx| {
@@ -111,11 +188,23 @@ pub fn calculate(allocator: std.mem.Allocator, structure: *const model.Structure
                     try index.put(allocator, key, contacts.items.len);
                     try contacts.append(allocator, .{ .atom_a = oriented.a, .atom_b = oriented.b, .residue_a = key.a, .residue_b = key.b, .distance = d });
                 }
-            }
+            };
         };
     }
+    if (profile) |p| {
+        p.search_ns = elapsedNs(stage_start, io);
+        stage_start = std.Io.Timestamp.now(io, .awake);
+    }
     std.mem.sort(ResidueContact, contacts.items, {}, residueContactLessThan);
+    if (profile) |p| {
+        p.sort_ns = elapsedNs(stage_start, io);
+        p.result_count = contacts.items.len;
+    }
     return .{ .residue = contacts };
+}
+
+fn elapsedNs(start: std.Io.Timestamp, io: std.Io) u64 {
+    return @intCast(start.untilNow(io, .awake).nanoseconds);
 }
 
 fn cellFor(atom: model.Atom, cutoff: f64) !Cell {
@@ -133,6 +222,12 @@ fn cellCoordinate(value: f64, cutoff: f64) !i64 {
 
 fn cellEqual(a: Cell, b: Cell) bool {
     return a.x == b.x and a.y == b.y and a.z == b.z;
+}
+
+fn cellLessThan(a: Cell, b: Cell) bool {
+    if (a.x != b.x) return a.x < b.x;
+    if (a.y != b.y) return a.y < b.y;
+    return a.z < b.z;
 }
 
 fn cellEntryLessThan(_: void, a: CellEntry, b: CellEntry) bool {

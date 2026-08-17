@@ -60,4 +60,18 @@ pub fn build(b: *std.Build) void {
     const bench_cmd = b.addRunArtifact(bench);
     const bench_step = b.step("bench", "Run deterministic cell-list microbenchmarks");
     bench_step.dependOn(&bench_cmd.step);
+
+    const profile = b.addExecutable(.{
+        .name = "zcontact-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/profile.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "zcontact", .module = mod }},
+        }),
+    });
+    const profile_cmd = b.addRunArtifact(profile);
+    if (b.args) |args| profile_cmd.addArgs(args);
+    const profile_step = b.step("profile", "Profile real-file pipeline stages (ReleaseFast)");
+    profile_step.dependOn(&profile_cmd.step);
 }
