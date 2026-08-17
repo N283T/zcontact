@@ -264,6 +264,71 @@ fn distanceSquared(a: model.Atom, b: model.Atom) f64 {
     return dx * dx + dy * dy + dz * dz;
 }
 
+fn calculateBruteForce(allocator: std.mem.Allocator, structure: *const model.Structure, mode: Mode, cutoff: f64, select1: []const u8, select2: []const u8, scope: Scope) !Result {
+    const atoms = structure.atoms.items;
+    const cutoff2 = cutoff * cutoff;
+    if (mode == .atom) {
+        var contacts = std.ArrayListUnmanaged(AtomContact).empty;
+        errdefer contacts.deinit(allocator);
+        for (atoms, 0..) |a, i| for (atoms[i + 1 ..], i + 1..) |b, j| {
+            const oriented = orientPair(@intCast(i), @intCast(j), selection.matches(a, select1), selection.matches(a, select2), selection.matches(b, select1), selection.matches(b, select2)) orelse continue;
+            if (scope == .inter_residue and a.residue_index == b.residue_index) continue;
+            const d2 = distanceSquared(a, b);
+            if (d2 <= cutoff2) try contacts.append(allocator, .{ .a = oriented.a, .b = oriented.b, .distance = @sqrt(d2) });
+        };
+        std.mem.sort(AtomContact, contacts.items, {}, atomContactLessThan);
+        return .{ .atom = contacts };
+    }
+
+    var index = std.AutoHashMapUnmanaged(ResiduePair, usize).empty;
+    defer index.deinit(allocator);
+    var contacts = std.ArrayListUnmanaged(ResidueContact).empty;
+    errdefer contacts.deinit(allocator);
+    for (atoms, 0..) |a, i| for (atoms[i + 1 ..], i + 1..) |b, j| {
+        const oriented = orientPair(@intCast(i), @intCast(j), selection.matches(a, select1), selection.matches(a, select2), selection.matches(b, select1), selection.matches(b, select2)) orelse continue;
+        if (scope == .inter_residue and a.residue_index == b.residue_index) continue;
+        const d2 = distanceSquared(a, b);
+        if (d2 > cutoff2) continue;
+        const key = ResiduePair{ .a = @min(a.residue_index, b.residue_index), .b = @max(a.residue_index, b.residue_index) };
+        const d = @sqrt(d2);
+        if (index.get(key)) |idx| {
+            const old = contacts.items[idx];
+            if (d < old.distance or (d == old.distance and atomPairLessThan(oriented.a, oriented.b, old.atom_a, old.atom_b)))
+                contacts.items[idx] = .{ .atom_a = oriented.a, .atom_b = oriented.b, .residue_a = key.a, .residue_b = key.b, .distance = d };
+        } else {
+            try index.put(allocator, key, contacts.items.len);
+            try contacts.append(allocator, .{ .atom_a = oriented.a, .atom_b = oriented.b, .residue_a = key.a, .residue_b = key.b, .distance = d });
+        }
+    };
+    std.mem.sort(ResidueContact, contacts.items, {}, residueContactLessThan);
+    return .{ .residue = contacts };
+}
+
+fn expectSameResult(expected: *const Result, actual: *const Result) !void {
+    switch (expected.*) {
+        .atom => |expected_contacts| {
+            const actual_contacts = actual.atom;
+            try std.testing.expectEqual(expected_contacts.items.len, actual_contacts.items.len);
+            for (expected_contacts.items, actual_contacts.items) |e, a| {
+                try std.testing.expectEqual(e.a, a.a);
+                try std.testing.expectEqual(e.b, a.b);
+                try std.testing.expectEqual(e.distance, a.distance);
+            }
+        },
+        .residue => |expected_contacts| {
+            const actual_contacts = actual.residue;
+            try std.testing.expectEqual(expected_contacts.items.len, actual_contacts.items.len);
+            for (expected_contacts.items, actual_contacts.items) |e, a| {
+                try std.testing.expectEqual(e.atom_a, a.atom_a);
+                try std.testing.expectEqual(e.atom_b, a.atom_b);
+                try std.testing.expectEqual(e.residue_a, a.residue_a);
+                try std.testing.expectEqual(e.residue_b, a.residue_b);
+                try std.testing.expectEqual(e.distance, a.distance);
+            }
+        },
+    }
+}
+
 test "atom and residue minimum-distance contacts" {
     var s = model.Structure{};
     defer s.deinit(std.testing.allocator);
@@ -314,6 +379,51 @@ test "cell list matches brute force across negative and boundary cells" {
         }
     };
     try std.testing.expectEqual(expected_count, result.atom.items.len);
+}
+
+test "randomized cell list matches scalar reference across modes and selections" {
+    const Case = struct { mode: Mode, cutoff: f64, select1: []const u8, select2: []const u8, scope: Scope };
+    const cases = [_]Case{
+        .{ .mode = .atom, .cutoff = 2.5, .select1 = "all", .select2 = "all", .scope = .all },
+        .{ .mode = .atom, .cutoff = 4.0, .select1 = "heavy", .select2 = "heavy", .scope = .inter_residue },
+        .{ .mode = .atom, .cutoff = 6.5, .select1 = "chain:A", .select2 = "chain:B", .scope = .inter_residue },
+        .{ .mode = .atom, .cutoff = 8.0, .select1 = "protein,backbone", .select2 = "protein,sidechain", .scope = .all },
+        .{ .mode = .residue, .cutoff = 2.5, .select1 = "all", .select2 = "all", .scope = .all },
+        .{ .mode = .residue, .cutoff = 4.0, .select1 = "heavy", .select2 = "heavy", .scope = .inter_residue },
+        .{ .mode = .residue, .cutoff = 6.5, .select1 = "chain:A", .select2 = "chain:B", .scope = .inter_residue },
+        .{ .mode = .residue, .cutoff = 8.0, .select1 = "protein,backbone", .select2 = "protein,sidechain", .scope = .all },
+    };
+    const names = [_][]const u8{ "N", "CA", "CB", "O" };
+    var prng = std.Random.DefaultPrng.init(0x5a434f4e54414354);
+    const random = prng.random();
+    for (0..24) |_| {
+        var structure = model.Structure{};
+        defer structure.deinit(std.testing.allocator);
+        for (0..48) |i| {
+            const residue_index: u32 = @intCast(i / 3);
+            const atom_name = names[i % names.len];
+            try structure.atoms.append(std.testing.allocator, .{
+                .serial = @intCast(i + 1),
+                .record = if (i % 11 == 0) .hetatm else .atom,
+                .name = try model.Field.init(atom_name),
+                .residue_name = try model.Field.init("ALA"),
+                .chain = try model.Field.init(if (residue_index % 2 == 0) "A" else "B"),
+                .residue_seq = @intCast(residue_index + 1),
+                .element = try model.Field.init(if (i % 7 == 0) "H" else if (std.mem.eql(u8, atom_name, "N")) "N" else if (std.mem.eql(u8, atom_name, "O")) "O" else "C"),
+                .x = random.float(f64) * 40.0 - 20.0,
+                .y = random.float(f64) * 40.0 - 20.0,
+                .z = random.float(f64) * 40.0 - 20.0,
+                .residue_index = residue_index,
+            });
+        }
+        for (cases) |case| {
+            var expected = try calculateBruteForce(std.testing.allocator, &structure, case.mode, case.cutoff, case.select1, case.select2, case.scope);
+            defer expected.deinit(std.testing.allocator);
+            var actual = try calculate(std.testing.allocator, &structure, case.mode, case.cutoff, case.select1, case.select2, case.scope);
+            defer actual.deinit(std.testing.allocator);
+            try expectSameResult(&expected, &actual);
+        }
+    }
 }
 
 test "library rejects invalid cutoff and selection" {

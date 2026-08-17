@@ -1,7 +1,7 @@
 # Validation and performance record
 
 This record captures the initial publication-oriented validation on 2026-08-17.
-Source datasets under `/Users/nagaet/pdb` were read-only.
+Source datasets under `$HOME/pdb` were read-only.
 
 ## Environment
 
@@ -79,7 +79,7 @@ Representative command:
 
 ```sh
 /usr/bin/time -l ./zig-out/bin/zcontact batch \
-  /Users/nagaet/pdb/afdb/UP000000625_83333_ECOLI_v6/pdb \
+  "$HOME/pdb/afdb/UP000000625_83333_ECOLI_v6/pdb" \
   --output-dir /tmp/zcontact-ecoli-pdb --threads 10 --quiet
 ```
 

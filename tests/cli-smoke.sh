@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 "$bin" --version >"$tmp/version.out" 2>"$tmp/version.err"
 test ! -s "$tmp/version.err"
-awk '$1 == "zcontact" && $2 == "0.1.0" { ok=1 } END { exit !ok }' "$tmp/version.out"
+awk '$1 == "zcontact" && $2 == "0.1.1" { ok=1 } END { exit !ok }' "$tmp/version.out"
 
 "$bin" "$fixture" >"$tmp/default.tsv"
 awk -F '\t' 'NR == 1 && $1 == "residue_index1" { ok=1 } END { exit !ok }' "$tmp/default.tsv"

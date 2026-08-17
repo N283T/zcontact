@@ -548,6 +548,39 @@ test "mmCIF falls back from null author identifiers row by row" {
     try std.testing.expectEqualStrings("HOH", s.atoms.items[0].residue_name.slice());
 }
 
+test "mmCIF atom loop hint preserves quoted tokens after unrelated metadata loops" {
+    const source =
+        "data_test\nloop_\n_demo.id\n_demo.text\n1 'metadata value'\n#\n" ++
+        "loop_\n_atom_site.group_PDB\n_atom_site.id\n_atom_site.type_symbol\n" ++
+        "_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n" ++
+        "_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n" ++
+        "ATOM 1 C 'CA' ALA A 1 1.25 -2.5 3.75\n#\n";
+    var s = try parse(std.testing.allocator, source, .mmcif, 1);
+    defer s.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), s.atoms.items.len);
+    try std.testing.expectEqualStrings("CA", s.atoms.items[0].name.slice());
+    try std.testing.expectApproxEqAbs(@as(f64, -2.5), s.atoms.items[0].y, 1e-12);
+}
+
+test "mmCIF rejects malformed atom-site values" {
+    const prefix =
+        "data_test\nloop_\n_atom_site.group_PDB\n_atom_site.id\n_atom_site.type_symbol\n" ++
+        "_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n" ++
+        "_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n_atom_site.occupancy\n";
+    try std.testing.expectError(error.NonFiniteCoordinate, parse(std.testing.allocator, prefix ++ "ATOM 1 C CA ALA A 1 nan 0 0 1\n#\n", .mmcif, 1));
+    try std.testing.expectError(error.InvalidOccupancy, parse(std.testing.allocator, prefix ++ "ATOM 1 C CA ALA A 1 0 0 0 -0.1\n#\n", .mmcif, 1));
+    try std.testing.expectError(error.IncompleteAtomSiteRow, parse(std.testing.allocator, prefix ++ "ATOM 1 C CA ALA A 1 0 0\n#\n", .mmcif, 1));
+    try std.testing.expectError(error.FieldTooLong, parse(std.testing.allocator, prefix ++ "ATOM 1 C THIS_ATOM_IDENTIFIER_IS_LONGER_THAN_THIRTY_TWO ALA A 1 0 0 0 1\n#\n", .mmcif, 1));
+}
+
+test "mmCIF rejects missing required atom-site columns" {
+    const source =
+        "data_test\nloop_\n_atom_site.group_PDB\n_atom_site.id\n_atom_site.type_symbol\n" ++
+        "_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n" ++
+        "_atom_site.Cartn_x\n_atom_site.Cartn_y\nATOM 1 C CA ALA A 1 0 0\n#\n";
+    try std.testing.expectError(error.MissingAtomSiteColumn, parse(std.testing.allocator, source, .mmcif, 1));
+}
+
 test "gzip-style suffix and HETATM content detection" {
     try std.testing.expectEqual(InputFormat.pdb, try detectFormat("ligand.pdb.gz", ""));
     try std.testing.expectEqual(InputFormat.mmcif, try detectFormat("structure.cif.gz", ""));

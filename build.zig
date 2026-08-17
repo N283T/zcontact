@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     const options = b.addOptions();
-    options.addOption([]const u8, "version", "0.1.0");
+    options.addOption([]const u8, "version", "0.1.1");
     const exe = b.addExecutable(.{
         .name = "zcontact",
         .root_module = b.createModule(.{

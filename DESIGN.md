@@ -4,7 +4,7 @@
 
 The repository initially contained only `README.md` and `AGENTS.md`. The first
 session inspected the local Zig 0.16 projects `zsasa`, `zdssp`, `zreduce`, and
-`ztraj` under `/Users/nagaet/ghq/github.com/N283T`:
+`ztraj` under `$HOME/ghq/github.com/N283T`:
 
 - `zsasa`, `zdssp`, and `zreduce` demonstrate self-contained PDB/mmCIF parsing,
   explicit model/altloc policies, a library module plus thin CLI, Zig 0.16 build
