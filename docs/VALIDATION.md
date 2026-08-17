@@ -240,3 +240,31 @@ SHA-256 was recomputed for every contact TSV. All 4,370 hashes matched between
 the one- and ten-worker PDB runs, and all 4,370 matched accession-by-accession
 between PDB and mmCIF. This confirms that the profiling-guided parser and search
 changes retain both scheduling and format determinism at full-corpus scale.
+
+## v0.1.1 release hardening
+
+The v0.1.1 candidate adds a deterministic randomized differential test. For 24
+seeded 48-atom structures, the cell list is compared field-for-field with a
+scalar all-pairs reference across eight atom/residue, cutoff, scope, symmetric,
+asymmetric, heavy-atom, backbone, and side-chain configurations. This adds 192
+property cases while remaining reproducible. Parser error-path tests additionally
+cover unrelated metadata loops, quoted mmCIF values, non-finite coordinates,
+negative occupancy, incomplete rows, overlong fields, and missing required
+columns. The complete suite now contains 24 tests.
+
+Release readiness was checked from `git archive`, not the development worktree.
+The extracted tree contained no `.git`, cache, generated binary, or local data.
+From that clean source tree the following all succeeded with Zig 0.16.0:
+
+```sh
+zig fmt --check build.zig build.zig.zon src/*.zig tests/*.zig
+zig build test --summary all
+zig build -Doptimize=ReleaseFast --summary all
+zig build bench
+zig build profile -- --iterations 1 tests/mini.cif
+```
+
+The clean run reported 24/24 tests, `zcontact 0.1.1`, and successful ReleaseFast,
+benchmark, and profiler builds. The tracked tree was also checked for credential
+patterns, private-key markers, generated artifacts, and machine-specific absolute
+paths before changing repository visibility.
