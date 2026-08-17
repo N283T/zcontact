@@ -18,16 +18,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+        include:
+          - os: ubuntu-latest
+            zig_archive: zig-x86_64-linux-0.16.0
+            zig_sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          - os: macos-latest
+            zig_archive: zig-aarch64-macos-0.16.0
+            zig_sha256: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.16.0
+        env:
+          ZIG_ARCHIVE: ${{ matrix.zig_archive }}
+          ZIG_SHA256: ${{ matrix.zig_sha256 }}
+        run: |
+          curl --fail --location --retry 3 --output zig.tar.xz \
+            "https://ziglang.org/download/0.16.0/${ZIG_ARCHIVE}.tar.xz"
+          echo "${ZIG_SHA256}  zig.tar.xz" | shasum -a 256 --check
+          tar -xJf zig.tar.xz
+          echo "${PWD}/${ZIG_ARCHIVE}" >> "${GITHUB_PATH}"
       - name: Check formatting
         run: zig fmt --check build.zig build.zig.zon src/*.zig tests/*.zig
       - name: Run tests

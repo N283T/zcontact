@@ -273,5 +273,5 @@ The audited commit was tagged `v0.1.1` before the repository became public.
 Public CI then reproduced the portable gates on both `ubuntu-latest` and
 `macos-latest`: formatting, all 24 tests, ReleaseFast, version output, benchmark
 smoke, and profiler smoke all passed. The workflow has read-only repository
-permissions and pins both checkout and Zig setup actions to reviewed commit
-SHAs.
+permissions, pins checkout to a reviewed commit SHA, and verifies official
+ziglang.org compiler archives against the release SHA-256 values before use.
