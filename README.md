@@ -1,5 +1,7 @@
 # zcontact
 
+[![CI](https://github.com/N283T/zcontact/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zcontact/actions/workflows/ci.yml)
+
 `zcontact` is a fast, standalone Zig CLI for finding atomic and residue
 contacts in biomolecular structures. It reads PDB and mmCIF, writes
 deterministic TSV, processes whole structure directories in parallel, and has
@@ -11,6 +13,8 @@ The tested toolchain is Zig 0.16.0. Zig's pre-1.0 standard-library APIs are
 not guaranteed to remain source-compatible with later releases.
 
 ```sh
+git clone https://github.com/N283T/zcontact.git
+cd zcontact
 zig build
 zig build test --summary all
 zig build bench

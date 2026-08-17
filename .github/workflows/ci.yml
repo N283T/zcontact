@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Zig 0.16.0 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Check formatting
+        run: zig fmt --check build.zig build.zig.zon src/*.zig tests/*.zig
+      - name: Run tests
+        run: zig build test --summary all
+      - name: Build ReleaseFast CLI
+        run: zig build -Doptimize=ReleaseFast --summary all
+      - name: Check version
+        run: test "$(./zig-out/bin/zcontact --version)" = "zcontact 0.1.1"
+      - name: Run benchmark smoke test
+        run: zig build bench
+      - name: Run profiler smoke test
+        run: zig build profile -- --iterations 1 tests/mini.cif > /dev/null
